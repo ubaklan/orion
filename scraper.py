@@ -14,13 +14,14 @@ import asyncio
 import aiohttp
 from threading import Thread, Event, Lock
 from queue import Queue
+
+import requests
 import urllib3
 import sys
 import platform
 from collections import defaultdict
 from bs4 import BeautifulSoup
 import json
-
 
 # Try to import netifaces, but make it optional
 try:
@@ -37,6 +38,17 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Global cookie storage with thread-safe access
 cookie_storage = defaultdict(dict)  # {domain: {cookie_name: cookie_value}}
 cookie_lock = Lock()
+
+
+class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
+    def __init__(self, *args, **kwargs):
+        self.socket_options = kwargs.pop("socket_options", None)
+        super(HTTPAdapterWithSocketOptions, self).__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        if self.socket_options is not None:
+            kwargs["socket_options"] = self.socket_options
+        super(HTTPAdapterWithSocketOptions, self).init_poolmanager(*args, **kwargs)
 
 
 def validate_interface(interface):
@@ -107,6 +119,18 @@ def build_cookie_header(domain_cookies):
     if not domain_cookies:
         return None
     return '; '.join([f"{k}={v}" for k, v in domain_cookies.items()])
+
+
+def restart_iface(iface):
+    if NETIFACES_AVAILABLE:
+        adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, iface.encode('utf-8'))])
+        session = requests.session()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        response = session.post('http://192.168.100.1/ajax', json={'funcNo': '1013'}, timeout=2)
+        print("Restart response: " + str(response))
+    else:
+        print('WARN: Skipping iface restart as the interface is unsupported')
 
 
 async def make_request_async(session, url, idx, headers=None, request_id=None, timeout=10, local_addr=None):
@@ -283,6 +307,7 @@ def batch_rate_limited_requester_async(urls, batches_per_second, batch_size, sto
                     results_queue.put(result)
 
                 print(f"[BATCH {batch_count}] Completed {len(batch_results)} requests")
+                restart_iface(interface)
 
             except Exception as e:
                 print(f"[BATCH {batch_count}] Batch failed: {e}")
