@@ -168,7 +168,8 @@ def print_ip(local_ip):
         interface = get_interface_for_ip(local_ip)
         if interface:
             try:
-                adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
+                adapter = HTTPAdapterWithSocketOptions(
+                    socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
                 session = requests.session()
                 session.mount("http://", adapter)
                 session.mount("https://", adapter)
@@ -188,7 +189,8 @@ def restart_iface(local_ip):
         interface = get_interface_for_ip(local_ip)
         if interface:
             try:
-                adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
+                adapter = HTTPAdapterWithSocketOptions(
+                    socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
                 session = requests.session()
                 session.mount("http://", adapter)
                 session.mount("https://", adapter)
@@ -310,13 +312,15 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
     # Create connector with interface binding
     if interface_name and hasattr(socket, 'SO_BINDTODEVICE'):
         # Use custom connector that binds to interface
-        connector = InterfaceBindingConnector(
-            interface_name=interface_name,
-            limit=max_concurrent,
-            limit_per_host=max_concurrent,
-            ttl_dns_cache=300,
-            use_dns_cache=True,
-        )
+        # connector = InterfaceBindingConnector(
+        #     interface_name=interface_name,
+        #     limit=max_concurrent,
+        #     limit_per_host=max_concurrent,
+        #     ttl_dns_cache=300,
+        #     use_dns_cache=True,
+        # )
+        connector = aiohttp.TCPConnector(local_addr=(local_ip, 0))  # 0 = any ephemeral port
+
         print(f"[BATCH {batch_id}] Using interface binding connector")
     else:
         # Fallback to regular connector with local_addr
