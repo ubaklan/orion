@@ -127,7 +127,7 @@ def print_ip(iface):
         session = requests.session()
         session.mount("http://", adapter)
         session.mount("https://", adapter)
-        response = session.get('ifconfig.io/ip', timeout=30)
+        response = session.get('https://ifconfig.io/ip', timeout=30)
         print("Restart response: " + str(response))
     else:
         print('WARN: Skipping iface print_ip as the interface is unsupported')
