@@ -165,6 +165,21 @@ def get_available_ips():
     return ips
 
 
+async def wait_until_interface_available(ip, check_interval=1.0, timeout=200):
+    """Wait until the specified IP appears on a network interface."""
+    print(f"Waiting for network interface with IP {ip} to become available...")
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        if validate_ip_on_system(ip):
+            print(f"Interface with IP {ip} is now available.")
+            return True
+        print('still waiting')
+        await asyncio.sleep(check_interval)
+
+    raise TimeoutError(f"Timeout waiting for network interface with IP {ip}")
+
+
 def get_domain_from_url(url):
     try:
         from urllib.parse import urlparse
@@ -349,19 +364,18 @@ async def make_request_async_using_requests(url, idx, headers=None, request_id=N
         if local_ip and NETIFACES_AVAILABLE:
             interface = get_interface_for_ip(local_ip)
             if interface:
-                    adapter = HTTPAdapterWithSocketOptions(
-                        socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
-                    session = requests.session()
-                    session.mount("http://", adapter)
-                    session.mount("https://", adapter)
-                    return session.get(url, headers=merged_headers, timeout=timeout)
+                adapter = HTTPAdapterWithSocketOptions(
+                    socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
+                session = requests.session()
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                return session.get(url, headers=merged_headers, timeout=timeout)
             else:
                 print(f'WARN: Could not find interface for IP {local_ip}')
                 return None
         else:
             print('WARN: Skipping interface restart - no local IP specified or netifaces unavailable')
             return requests.get(url, headers=merged_headers, timeout=timeout)
-
 
     try:
         # Run blocking requests.get() in threadpool without blocking event loop
@@ -437,16 +451,9 @@ def batch_rate_limited_requester_async(urls, batches_per_second, batch_size, sto
 
                 print(f"[BATCH {batch_count}] Completed {len(batch_results)} requests")
                 restart_iface(local_ip)
-
+                await wait_until_interface_available(local_ip)
             except Exception as e:
                 print(f"[BATCH {batch_count}] Batch failed: {e}")
-
-            elapsed = time.time() - start_time
-            sleep_time = max(0, interval - elapsed)
-
-            if sleep_time > 0:
-                print(f"[BATCH {batch_count}] Waiting {sleep_time:.2f}s for next batch...")
-                await asyncio.sleep(sleep_time)
 
     try:
         asyncio.run(run_batches())
