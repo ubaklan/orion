@@ -11,8 +11,9 @@ import time
 import json
 import socket
 import asyncio
+from typing import Optional
+
 import aiohttp
-import socket
 from threading import Thread, Event, Lock
 from queue import Queue
 
@@ -24,10 +25,6 @@ from collections import defaultdict
 from bs4 import BeautifulSoup
 import json
 import ipaddress
-import socket
-import aiohttp
-from aiohttp import TCPConnector
-
 
 # Try to import netifaces, but make it optional
 try:
@@ -45,14 +42,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 cookie_storage = defaultdict(dict)  # {domain: {cookie_name: cookie_value}}
 cookie_lock = Lock()
 
-class BoundTCPConnector(TCPConnector):
-    def _wrap_create_connection(self, *args, **kwargs):
-        orig = super()._wrap_create_connection(*args, **kwargs)
-        async def bind_and_connect(sock, *args, **kwargs):
-            sock.setsockopt(socket.SOL_SOCKET, 25, b'enx020054323163\0')  # SO_BINDTODEVICE
-            return await orig(sock, *args, **kwargs)
-        return bind_and_connect
-
 
 class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
     def __init__(self, *args, **kwargs):
@@ -63,6 +52,38 @@ class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
         if self.socket_options is not None:
             kwargs["socket_options"] = self.socket_options
         super(HTTPAdapterWithSocketOptions, self).init_poolmanager(*args, **kwargs)
+
+
+class LocalAddressTCPConnector(aiohttp.TCPConnector):
+    """Custom TCP connector that properly binds to a specific local interface."""
+
+    def __init__(self, interface_name=None, *args, **kwargs):
+        self.interface_name = interface_name
+        super().__init__(*args, **kwargs)
+
+    async def _create_connection(self, req, traces, timeout):
+        """Override connection creation to bind to specific interface."""
+        if self.interface_name:
+            # Create socket and bind to interface
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                # Bind socket to specific interface
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.interface_name.encode())
+                sock.setblocking(False)
+
+                # Use the custom socket for connection
+                return await self._loop.create_connection(
+                    lambda: aiohttp.client_proto.ResponseHandler(loop=self._loop),
+                    sock=sock
+                )
+            except Exception as e:
+                sock.close()
+                print(f"Failed to bind to interface {self.interface_name}: {e}")
+                # Fall back to default behavior
+                pass
+
+        # Use default connection method
+        return await super()._create_connection(req, traces, timeout)
 
 
 def validate_ip_address(ip_str):
@@ -216,62 +237,6 @@ def restart_iface(local_ip):
         print('WARN: Skipping interface restart - no local IP specified or netifaces unavailable')
 
 
-async def make_request_async(session, url, idx, headers=None, request_id=None, timeout=10, local_addr=None):
-    """Make a single async HTTP request and return the result."""
-    if headers is None:
-        headers = {}
-
-    # Set default headers
-    default_headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-        'Content-Type': 'text/plain;text/html',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,ru;q=0.7',
-        'Cache-Control': 'no-cache',
-        'Accept-Encoding': 'gzip, deflate'
-    }
-
-    # Merge default headers with provided headers
-    merged_headers = {**default_headers, **headers}
-
-    try:
-        print(f'[{request_id}] Sending async request to {url}')
-
-        timeout_obj = aiohttp.ClientTimeout(total=timeout)
-        async with session.get(url, headers=merged_headers, timeout=timeout_obj, allow_redirects=True) as response:
-            text = await response.text()
-            data = extract_next_data_json(text)
-
-            success = data is not None
-            posted = False
-
-            if success:
-                posted = await post_extracted_data_item(data)
-
-            result = {
-                'request_id': request_id,
-                'url': url,
-                'status_code': response.status if success else 400,
-                'success': success and posted,
-                'posted': posted,
-                'body_length': len(text),
-            }
-
-            print(
-                f'[{request_id}] Request completed - Status: {result["status_code"]}, Success: {result["success"]}, Response: {text}')
-            return result
-
-    except Exception as e:
-        error_result = {
-            'request_id': request_id,
-            'url': url,
-            'error': str(e),
-            'success': False
-        }
-        print(f'[{request_id}] Request failed: {str(e)}')
-        return error_result
-
-
 def extract_next_data_json(html_text):
     """Extract the JSON inside <script id="__NEXT_DATA__">...</script> using BeautifulSoup."""
     try:
@@ -282,30 +247,6 @@ def extract_next_data_json(html_text):
     except Exception as e:
         print(f"[ERROR] Failed to extract __NEXT_DATA__: {e}")
     return None
-
-
-class InterfaceBindingConnector(aiohttp.TCPConnector):
-    """TCP connector that binds to a specific network interface."""
-
-    def __init__(self, interface_name=None, *args, **kwargs):
-        self.interface_name = interface_name
-        super().__init__(*args, **kwargs)
-
-    def _make_socket(self, family, type, proto, flags):
-        """Override socket creation to bind to interface."""
-        sock = super()._make_socket(family, type, proto, flags)
-
-        if self.interface_name and hasattr(socket, 'SO_BINDTODEVICE'):
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
-                                self.interface_name.encode())
-                print(f"Socket bound to interface: {self.interface_name}")
-            except Exception as e:
-                print(f"Failed to bind socket to interface {self.interface_name}: {e}")
-        else:
-            print('[ERROR]: Unable to override socket creation')
-
-        return sock
 
 
 async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concurrent=200):
@@ -321,21 +262,18 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
         else:
             print(f"[BATCH {batch_id}] Warning: Could not find interface for IP: {local_ip}")
 
-    # Create connector with interface binding
-    if interface_name and hasattr(socket, 'SO_BINDTODEVICE'):
+    # Create connector with proper interface binding
+    if interface_name:
         # Use custom connector that binds to interface
-        # connector = InterfaceBindingConnector(
-        #     interface_name=interface_name,
-        #     limit=max_concurrent,
-        #     limit_per_host=max_concurrent,
-        #     ttl_dns_cache=300,
-        #     use_dns_cache=True,
-        # )
-        connector = aiohttp.TCPConnector(local_addr=(local_ip, 0))  # 0 = any ephemeral port
-
-        print(f"[BATCH {batch_id}] Using interface binding connector")
+        connector = LocalAddressTCPConnector(
+            interface_name=interface_name,
+            limit=max_concurrent,
+            limit_per_host=max_concurrent,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+        )
     else:
-        # Fallback to regular connector with local_addr
+        # Fallback to regular connector
         connector_kwargs = {
             'limit': max_concurrent,
             'limit_per_host': max_concurrent,
@@ -346,14 +284,14 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
         if local_ip:
             try:
                 connector_kwargs['local_addr'] = (local_ip, 0)
-                print(f"[BATCH {batch_id}] Using local_addr binding: {local_ip}")
+                print(f"[BATCH {batch_id}] Binding to local address: {local_ip}")
             except Exception as e:
                 print(f"Warning: Could not bind to local address {local_ip}: {e}")
 
         connector = aiohttp.TCPConnector(**connector_kwargs)
 
     async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(local_addr=(local_ip, 0)),
+            connector=connector,
             timeout=aiohttp.ClientTimeout(total=timeout),
             trust_env=True
     ) as session:
@@ -365,7 +303,7 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
             headers = url_config.get('headers', {})
             request_id = f"{batch_id}-{i + 1}"
 
-            task = make_request_async(session, url, i, headers, request_id, timeout, local_ip)
+            task = make_request_async_using_requests(url, i, headers, request_id, timeout, local_ip)
             tasks.append(task)
 
         # Execute all requests concurrently
@@ -388,6 +326,77 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
                 processed_results.append(result)
 
         return processed_results
+
+
+async def make_request_async_using_requests(url, idx, headers=None, request_id=None, timeout=10,
+                                            local_ip: Optional[str] = None):
+    if headers is None:
+        headers = {}
+
+    default_headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'Content-Type': 'text/plain;text/html',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,ru;q=0.7',
+        'Cache-Control': 'no-cache',
+        'Accept-Encoding': 'gzip, deflate'
+    }
+
+    merged_headers = {**default_headers, **headers}
+
+    def blocking_request():
+        print(f'[{request_id}] Sending blocking request to {url}')
+        if local_ip and NETIFACES_AVAILABLE:
+            interface = get_interface_for_ip(local_ip)
+            if interface:
+                    adapter = HTTPAdapterWithSocketOptions(
+                        socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
+                    session = requests.session()
+                    session.mount("http://", adapter)
+                    session.mount("https://", adapter)
+                    return session.get(url, headers=merged_headers, timeout=timeout)
+            else:
+                print(f'WARN: Could not find interface for IP {local_ip}')
+                return None
+        else:
+            print('WARN: Skipping interface restart - no local IP specified or netifaces unavailable')
+            return requests.get(url, headers=merged_headers, timeout=timeout)
+
+
+    try:
+        # Run blocking requests.get() in threadpool without blocking event loop
+        response = await asyncio.to_thread(blocking_request)
+        text = response.text
+        data = extract_next_data_json(text)
+
+        success = data is not None
+        posted = False
+        if success:
+            # if post_extracted_data_item is async, await it
+            posted = await post_extracted_data_item(data)
+
+        result = {
+            'request_id': request_id,
+            'url': url,
+            'status_code': response.status_code if success else 400,
+            'success': success and posted,
+            'posted': posted,
+            'body_length': len(text),
+        }
+
+        print(
+            f'[{request_id}] Request completed - Status: {result["status_code"]}, Success: {result["success"]}, text: {text}')
+        return result
+
+    except Exception as e:
+        error_result = {
+            'request_id': request_id,
+            'url': url,
+            'error': str(e),
+            'success': False
+        }
+        print(f'[{request_id}] Request failed: {str(e)}')
+        return error_result
 
 
 def batch_rate_limited_requester_async(urls, batches_per_second, batch_size, stop_event, results_queue,
