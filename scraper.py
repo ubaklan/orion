@@ -24,6 +24,10 @@ from collections import defaultdict
 from bs4 import BeautifulSoup
 import json
 import ipaddress
+import socket
+import aiohttp
+from aiohttp import TCPConnector
+
 
 # Try to import netifaces, but make it optional
 try:
@@ -40,6 +44,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Global cookie storage with thread-safe access
 cookie_storage = defaultdict(dict)  # {domain: {cookie_name: cookie_value}}
 cookie_lock = Lock()
+
+class BoundTCPConnector(TCPConnector):
+    def _wrap_create_connection(self, *args, **kwargs):
+        orig = super()._wrap_create_connection(*args, **kwargs)
+        async def bind_and_connect(sock, *args, **kwargs):
+            sock.setsockopt(socket.SOL_SOCKET, 25, b'enx020054323163\0')  # SO_BINDTODEVICE
+            return await orig(sock, *args, **kwargs)
+        return bind_and_connect
 
 
 class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
@@ -341,7 +353,9 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
         connector = aiohttp.TCPConnector(**connector_kwargs)
 
     async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(local_addr=(local_ip, 0))
+            connector=aiohttp.TCPConnector(local_addr=(local_ip, 0)),
+            timeout=aiohttp.ClientTimeout(total=timeout),
+            trust_env=True
     ) as session:
 
         # Create all request tasks
