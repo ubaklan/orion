@@ -121,6 +121,18 @@ def build_cookie_header(domain_cookies):
     return '; '.join([f"{k}={v}" for k, v in domain_cookies.items()])
 
 
+def print_ip(iface):
+    if NETIFACES_AVAILABLE:
+        adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, iface.encode('utf-8'))])
+        session = requests.session()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        response = session.get('ifconfig.io/ip', timeout=30)
+        print("Restart response: " + str(response))
+    else:
+        print('WARN: Skipping iface print_ip as the interface is unsupported')
+
+
 def restart_iface(iface):
     if NETIFACES_AVAILABLE:
         adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, iface.encode('utf-8'))])
@@ -301,6 +313,7 @@ def batch_rate_limited_requester_async(urls, batches_per_second, batch_size, sto
                     print(f"[BATCH {batch_count}] Cookie state: {total_cookies} cookies across {total_domains} domains")
 
             try:
+                print_ip(interface)
                 batch_results = await send_batch_async(batch_urls, batch_count, timeout, local_addr, max_concurrent)
 
                 for result in batch_results:
