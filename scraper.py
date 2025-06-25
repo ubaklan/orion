@@ -12,6 +12,7 @@ import json
 import socket
 import asyncio
 import aiohttp
+import socket
 from threading import Thread, Event, Lock
 from queue import Queue
 
@@ -50,38 +51,6 @@ class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
         if self.socket_options is not None:
             kwargs["socket_options"] = self.socket_options
         super(HTTPAdapterWithSocketOptions, self).init_poolmanager(*args, **kwargs)
-
-
-class LocalAddressTCPConnector(aiohttp.TCPConnector):
-    """Custom TCP connector that properly binds to a specific local interface."""
-
-    def __init__(self, interface_name=None, *args, **kwargs):
-        self.interface_name = interface_name
-        super().__init__(*args, **kwargs)
-
-    async def _create_connection(self, req, traces, timeout):
-        """Override connection creation to bind to specific interface."""
-        if self.interface_name:
-            # Create socket and bind to interface
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                # Bind socket to specific interface
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.interface_name.encode())
-                sock.setblocking(False)
-
-                # Use the custom socket for connection
-                return await self._loop.create_connection(
-                    lambda: aiohttp.client_proto.ResponseHandler(loop=self._loop),
-                    sock=sock
-                )
-            except Exception as e:
-                sock.close()
-                print(f"Failed to bind to interface {self.interface_name}: {e}")
-                # Fall back to default behavior
-                pass
-
-        # Use default connection method
-        return await super()._create_connection(req, traces, timeout)
 
 
 def validate_ip_address(ip_str):
@@ -301,6 +270,28 @@ def extract_next_data_json(html_text):
     return None
 
 
+class InterfaceBindingConnector(aiohttp.TCPConnector):
+    """TCP connector that binds to a specific network interface."""
+
+    def __init__(self, interface_name=None, *args, **kwargs):
+        self.interface_name = interface_name
+        super().__init__(*args, **kwargs)
+
+    def _make_socket(self, family, type, proto, flags):
+        """Override socket creation to bind to interface."""
+        sock = super()._make_socket(family, type, proto, flags)
+
+        if self.interface_name and hasattr(socket, 'SO_BINDTODEVICE'):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
+                                self.interface_name.encode())
+                print(f"Socket bound to interface: {self.interface_name}")
+            except Exception as e:
+                print(f"Failed to bind socket to interface {self.interface_name}: {e}")
+
+        return sock
+
+
 async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concurrent=200):
     """Send a batch of requests asynchronously."""
     results = []
@@ -314,18 +305,19 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
         else:
             print(f"[BATCH {batch_id}] Warning: Could not find interface for IP: {local_ip}")
 
-    # Create connector with proper interface binding
-    if interface_name:
+    # Create connector with interface binding
+    if interface_name and hasattr(socket, 'SO_BINDTODEVICE'):
         # Use custom connector that binds to interface
-        connector = LocalAddressTCPConnector(
+        connector = InterfaceBindingConnector(
             interface_name=interface_name,
             limit=max_concurrent,
             limit_per_host=max_concurrent,
             ttl_dns_cache=300,
             use_dns_cache=True,
         )
+        print(f"[BATCH {batch_id}] Using interface binding connector")
     else:
-        # Fallback to regular connector
+        # Fallback to regular connector with local_addr
         connector_kwargs = {
             'limit': max_concurrent,
             'limit_per_host': max_concurrent,
@@ -336,7 +328,7 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
         if local_ip:
             try:
                 connector_kwargs['local_addr'] = (local_ip, 0)
-                print(f"[BATCH {batch_id}] Binding to local address: {local_ip}")
+                print(f"[BATCH {batch_id}] Using local_addr binding: {local_ip}")
             except Exception as e:
                 print(f"Warning: Could not bind to local address {local_ip}: {e}")
 
