@@ -52,30 +52,36 @@ class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
         super(HTTPAdapterWithSocketOptions, self).init_poolmanager(*args, **kwargs)
 
 
-async def test_ip_binding(local_addr):
-    """Test if IP binding is working by making a request to a service that shows our IP."""
-    if not local_addr:
-        print("No local address specified, using default routing")
-        return
+class LocalAddressTCPConnector(aiohttp.TCPConnector):
+    """Custom TCP connector that properly binds to a specific local interface."""
 
-    print(f"Testing IP binding to {local_addr}...")
+    def __init__(self, interface_name=None, *args, **kwargs):
+        self.interface_name = interface_name
+        super().__init__(*args, **kwargs)
 
-    try:
-        connector = aiohttp.TCPConnector(local_addr=(local_addr, 0))
-        async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get('https://httpbin.org/ip') as response:
-                result = await response.json()
-                detected_ip = result.get('origin', 'unknown')
-                print(f"Request sent from IP: {detected_ip}")
-                if local_addr in detected_ip:
-                    print(f"✓ Successfully bound to {local_addr}")
-                    return True
-                else:
-                    print(f"✗ Binding failed - expected {local_addr}, got {detected_ip}")
-                    return False
-    except Exception as e:
-        print(f"IP binding test failed: {e}")
-        return False
+    async def _create_connection(self, req, traces, timeout):
+        """Override connection creation to bind to specific interface."""
+        if self.interface_name:
+            # Create socket and bind to interface
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                # Bind socket to specific interface
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.interface_name.encode())
+                sock.setblocking(False)
+
+                # Use the custom socket for connection
+                return await self._loop.create_connection(
+                    lambda: aiohttp.client_proto.ResponseHandler(loop=self._loop),
+                    sock=sock
+                )
+            except Exception as e:
+                sock.close()
+                print(f"Failed to bind to interface {self.interface_name}: {e}")
+                # Fall back to default behavior
+                pass
+
+        # Use default connection method
+        return await super()._create_connection(req, traces, timeout)
 
 
 def validate_ip_address(ip_str):
@@ -239,7 +245,7 @@ async def make_request_async(session, url, idx, headers=None, request_id=None, t
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,ru;q=0.7',
         'Cache-Control': 'no-cache',
-        'Accept-Encoding': 'gzip, deflate'  # Removed 'br' (brotli) to avoid decode errors
+        'Accept-Encoding': 'gzip, deflate'
     }
 
     # Merge default headers with provided headers
@@ -269,7 +275,7 @@ async def make_request_async(session, url, idx, headers=None, request_id=None, t
             }
 
             print(
-                f'[{request_id}] Request completed - Status: {result["status_code"]}, Success: {result["success"]}')
+                f'[{request_id}] Request completed - Status: {result["status_code"]}, Success: {result["success"]}, Response: {text}')
             return result
 
     except Exception as e:
@@ -295,23 +301,46 @@ def extract_next_data_json(html_text):
     return None
 
 
-async def send_batch_async(urls, batch_id, timeout=30, local_addr=None, max_concurrent=200):
+async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concurrent=200):
     """Send a batch of requests asynchronously."""
     results = []
 
-    # Create connector with local address binding if available
-    connector_kwargs = {
-        'limit': max_concurrent,
-        'limit_per_host': max_concurrent,
-        'ttl_dns_cache': 300,
-        'use_dns_cache': True,
-    }
+    # Get interface name for the local IP
+    interface_name = None
+    if local_ip and NETIFACES_AVAILABLE:
+        interface_name = get_interface_for_ip(local_ip)
+        if interface_name:
+            print(f"[BATCH {batch_id}] Using interface: {interface_name} for IP: {local_ip}")
+        else:
+            print(f"[BATCH {batch_id}] Warning: Could not find interface for IP: {local_ip}")
 
-    if local_addr:
-        print(f"[BATCH {batch_id}] Binding to local address: {local_addr}")
-        connector_kwargs['local_addr'] = (local_addr, 0)
+    # Create connector with proper interface binding
+    if interface_name:
+        # Use custom connector that binds to interface
+        connector = LocalAddressTCPConnector(
+            interface_name=interface_name,
+            limit=max_concurrent,
+            limit_per_host=max_concurrent,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+        )
+    else:
+        # Fallback to regular connector
+        connector_kwargs = {
+            'limit': max_concurrent,
+            'limit_per_host': max_concurrent,
+            'ttl_dns_cache': 300,
+            'use_dns_cache': True,
+        }
 
-    connector = aiohttp.TCPConnector(**connector_kwargs)
+        if local_ip:
+            try:
+                connector_kwargs['local_addr'] = (local_ip, 0)
+                print(f"[BATCH {batch_id}] Binding to local address: {local_ip}")
+            except Exception as e:
+                print(f"Warning: Could not bind to local address {local_ip}: {e}")
+
+        connector = aiohttp.TCPConnector(**connector_kwargs)
 
     async with aiohttp.ClientSession(
             connector=connector,
@@ -326,7 +355,7 @@ async def send_batch_async(urls, batch_id, timeout=30, local_addr=None, max_conc
             headers = url_config.get('headers', {})
             request_id = f"{batch_id}-{i + 1}"
 
-            task = make_request_async(session, url, i, headers, request_id, timeout, local_addr)
+            task = make_request_async(session, url, i, headers, request_id, timeout, local_ip)
             tasks.append(task)
 
         # Execute all requests concurrently
@@ -505,15 +534,6 @@ def main():
         print(f"IP address validation failed. Continue anyway? (y/n): ", end='')
         if input().lower() != 'y':
             return
-
-    # Test IP binding if specified
-    if args.local_ip:
-        print("Testing IP binding...")
-        binding_success = asyncio.run(test_ip_binding(args.local_ip))
-        if not binding_success:
-            print(f"IP binding test failed. Continue anyway? (y/n): ", end='')
-            if input().lower() != 'y':
-                return
 
     urls = load_urls_from_file(args.urls_file)
     if urls is None or not urls:
