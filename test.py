@@ -7,22 +7,23 @@ class BindToDeviceTCPConnector(aiohttp.TCPConnector):
         super().__init__(*args, **kwargs)
         self.device_name = device_name.encode()
 
-    async def _create_connection(self, req, *args, **kwargs):
-        # This method creates the connection socket
-        # We override it to create a socket with SO_BINDTODEVICE set
-
+    async def _wrap_create_connection(self, protocol_factory, host, port, *args, **kwargs):
         loop = self._loop
 
-        def _sock_factory():
+        def sock_factory():
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # Bind to device, Linux-only and requires privileges
-            sock.setsockopt(socket.SOL_SOCKET, 25, self.device_name)  # 25 is SO_BINDTODEVICE
             sock.setblocking(False)
+            sock.setsockopt(socket.SOL_SOCKET, 25, self.device_name)  # SO_BINDTODEVICE
             return sock
 
-        kwargs['sock'] = _sock_factory()
-
-        return await super()._create_connection(req, *args, **kwargs)
+        return await loop.create_connection(
+            protocol_factory,
+            host,
+            port,
+            *args,
+            sock=sock_factory(),
+            **kwargs,
+        )
 
 async def test_request():
     connector = BindToDeviceTCPConnector('enx020054323163')
