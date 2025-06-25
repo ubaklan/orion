@@ -174,7 +174,6 @@ async def wait_until_interface_available(ip, check_interval=1.0, timeout=200):
         if validate_ip_on_system(ip):
             print(f"Interface with IP {ip} is now available.")
             return True
-        print('still waiting')
         await asyncio.sleep(check_interval)
 
     raise TimeoutError(f"Timeout waiting for network interface with IP {ip}")
@@ -451,6 +450,7 @@ def batch_rate_limited_requester_async(urls, batches_per_second, batch_size, sto
 
                 print(f"[BATCH {batch_count}] Completed {len(batch_results)} requests")
                 restart_iface(local_ip)
+                await asyncio.sleep(3)
                 await wait_until_interface_available(local_ip)
             except Exception as e:
                 print(f"[BATCH {batch_count}] Batch failed: {e}")
