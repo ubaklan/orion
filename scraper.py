@@ -52,6 +52,32 @@ class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
         super(HTTPAdapterWithSocketOptions, self).init_poolmanager(*args, **kwargs)
 
 
+async def test_ip_binding(local_addr):
+    """Test if IP binding is working by making a request to a service that shows our IP."""
+    if not local_addr:
+        print("No local address specified, using default routing")
+        return
+
+    print(f"Testing IP binding to {local_addr}...")
+
+    try:
+        connector = aiohttp.TCPConnector(local_addr=(local_addr, 0))
+        async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get('https://httpbin.org/ip') as response:
+                result = await response.json()
+                detected_ip = result.get('origin', 'unknown')
+                print(f"Request sent from IP: {detected_ip}")
+                if local_addr in detected_ip:
+                    print(f"✓ Successfully bound to {local_addr}")
+                    return True
+                else:
+                    print(f"✗ Binding failed - expected {local_addr}, got {detected_ip}")
+                    return False
+    except Exception as e:
+        print(f"IP binding test failed: {e}")
+        return False
+
+
 def validate_ip_address(ip_str):
     """Validate that the provided string is a valid IP address."""
     try:
@@ -213,7 +239,7 @@ async def make_request_async(session, url, idx, headers=None, request_id=None, t
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8,ru;q=0.7',
         'Cache-Control': 'no-cache',
-        'Accept-Encoding': 'gzip, deflate'
+        'Accept-Encoding': 'gzip, deflate'  # Removed 'br' (brotli) to avoid decode errors
     }
 
     # Merge default headers with provided headers
@@ -243,7 +269,7 @@ async def make_request_async(session, url, idx, headers=None, request_id=None, t
             }
 
             print(
-                f'[{request_id}] Request completed - Status: {result["status_code"]}, Success: {result["success"]}, {text}')
+                f'[{request_id}] Request completed - Status: {result["status_code"]}, Success: {result["success"]}')
             return result
 
     except Exception as e:
@@ -282,11 +308,8 @@ async def send_batch_async(urls, batch_id, timeout=30, local_addr=None, max_conc
     }
 
     if local_addr:
-        try:
-            connector_kwargs['local_addr'] = (local_addr, 0)
-            print(f"[BATCH {batch_id}] Binding to local address: {local_addr}")
-        except Exception as e:
-            print(f"Warning: Could not bind to local address {local_addr}: {e}")
+        print(f"[BATCH {batch_id}] Binding to local address: {local_addr}")
+        connector_kwargs['local_addr'] = (local_addr, 0)
 
     connector = aiohttp.TCPConnector(**connector_kwargs)
 
@@ -482,6 +505,15 @@ def main():
         print(f"IP address validation failed. Continue anyway? (y/n): ", end='')
         if input().lower() != 'y':
             return
+
+    # Test IP binding if specified
+    if args.local_ip:
+        print("Testing IP binding...")
+        binding_success = asyncio.run(test_ip_binding(args.local_ip))
+        if not binding_success:
+            print(f"IP binding test failed. Continue anyway? (y/n): ", end='')
+            if input().lower() != 'y':
+                return
 
     urls = load_urls_from_file(args.urls_file)
     if urls is None or not urls:
