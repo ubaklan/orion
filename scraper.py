@@ -341,9 +341,7 @@ async def send_batch_async(urls, batch_id, timeout=30, local_ip=None, max_concur
         connector = aiohttp.TCPConnector(**connector_kwargs)
 
     async with aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(local_addr=(local_ip, 0)),
-            timeout=aiohttp.ClientTimeout(total=timeout),
-            trust_env=True
+            connector=aiohttp.TCPConnector(local_addr=(local_ip, 0))
     ) as session:
 
         # Create all request tasks
