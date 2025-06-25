@@ -288,6 +288,8 @@ class InterfaceBindingConnector(aiohttp.TCPConnector):
                 print(f"Socket bound to interface: {self.interface_name}")
             except Exception as e:
                 print(f"Failed to bind socket to interface {self.interface_name}: {e}")
+        else:
+            print('[ERROR]: Unable to override socket creation')
 
         return sock
 
