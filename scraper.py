@@ -165,7 +165,7 @@ def get_available_ips():
     return ips
 
 
-async def wait_until_interface_available(ip, check_interval=1.0, timeout=200):
+async def wait_until_interface_available(ip, check_interval=5.0, timeout=200):
     """Wait until the specified IP appears on a network interface."""
     print(f"Waiting for network interface with IP {ip} to become available...")
     start_time = time.time()
