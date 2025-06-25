@@ -140,7 +140,7 @@ def restart_iface(iface):
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         response = session.post('http://192.168.100.1/ajax', json={'funcNo': '1013'}, timeout=2)
-        print("Restart response: " + str(response))
+        print("Restart response: " + str(response.text))
     else:
         print('WARN: Skipping iface restart as the interface is unsupported')
 
