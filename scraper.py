@@ -243,7 +243,7 @@ async def make_request_async(session, url, idx, headers=None, request_id=None, t
             }
 
             print(
-                f'[{request_id}] Request completed - Status: {result["status_code"]}, Success: {result["success"]}')
+                f'[{request_id}] Request completed - Status: {result["status_code"]}, Success: {result["success"]}, {text}')
             return result
 
     except Exception as e:
