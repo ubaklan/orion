@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 HTTP Request Rate Limiter Script - Async Batch Version with Cookie Persistence
-Sends HTTP requests in batches to predefined URLs at a specified rate through a specific network interface.
+Sends HTTP requests in batches to predefined URLs at a specified rate through a specific IP address.
 Uses asyncio for true concurrent execution and maintains cookies across batches.
 """
 
@@ -22,6 +22,7 @@ import platform
 from collections import defaultdict
 from bs4 import BeautifulSoup
 import json
+import ipaddress
 
 # Try to import netifaces, but make it optional
 try:
@@ -51,44 +52,83 @@ class HTTPAdapterWithSocketOptions(requests.adapters.HTTPAdapter):
         super(HTTPAdapterWithSocketOptions, self).init_poolmanager(*args, **kwargs)
 
 
-def validate_interface(interface):
-    """Validate that the network interface exists and is active."""
-    if not NETIFACES_AVAILABLE:
-        print(f"Warning: Cannot validate interface {interface} - netifaces not available")
-        return True
-
+def validate_ip_address(ip_str):
+    """Validate that the provided string is a valid IP address."""
     try:
-        if interface in netifaces.interfaces():
-            addrs = netifaces.ifaddresses(interface)
-            if netifaces.AF_INET in addrs:
-                ip = addrs[netifaces.AF_INET][0]['addr']
-                print(f"Interface {interface} found with IP: {ip}")
-                return True
-            else:
-                print(f"Warning: Interface {interface} exists but has no IPv4 address")
-                return False
-        else:
-            print(f"Error: Interface {interface} not found")
-            print(f"Available interfaces: {', '.join(netifaces.interfaces())}")
-            return False
-    except Exception as e:
-        print(f"Error checking interface {interface}: {e}")
+        ipaddress.ip_address(ip_str)
+        return True
+    except ValueError:
         return False
 
 
-def get_interface_ip(interface):
-    """Get the IP address of the specified interface."""
+def get_interface_for_ip(target_ip):
+    """Find the network interface that has the specified IP address."""
     if not NETIFACES_AVAILABLE:
+        print(f"Warning: Cannot find interface for IP {target_ip} - netifaces not available")
         return None
 
     try:
-        if interface in netifaces.interfaces():
-            addrs = netifaces.ifaddresses(interface)
-            if netifaces.AF_INET in addrs:
-                return addrs[netifaces.AF_INET][0]['addr']
+        for interface in netifaces.interfaces():
+            try:
+                addrs = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET in addrs:
+                    for addr_info in addrs[netifaces.AF_INET]:
+                        if addr_info.get('addr') == target_ip:
+                            print(f"Found IP {target_ip} on interface {interface}")
+                            return interface
+            except Exception as e:
+                continue
+
+        print(f"Warning: IP address {target_ip} not found on any interface")
+        return None
     except Exception as e:
-        print(f"Error getting IP for interface {interface}: {e}")
-    return None
+        print(f"Error finding interface for IP {target_ip}: {e}")
+        return None
+
+
+def validate_ip_on_system(ip_str):
+    """Validate that the IP address exists on the system."""
+    if not validate_ip_address(ip_str):
+        print(f"Error: {ip_str} is not a valid IP address")
+        return False
+
+    if not NETIFACES_AVAILABLE:
+        print(f"Warning: Cannot validate IP {ip_str} - netifaces not available")
+        return True
+
+    interface = get_interface_for_ip(ip_str)
+    if interface:
+        print(f"IP {ip_str} validated on interface {interface}")
+        return True
+    else:
+        print(f"Error: IP {ip_str} not found on any network interface")
+        available_ips = get_available_ips()
+        if available_ips:
+            print(f"Available IP addresses: {', '.join(available_ips)}")
+        return False
+
+
+def get_available_ips():
+    """Get all available IP addresses on the system."""
+    if not NETIFACES_AVAILABLE:
+        return []
+
+    ips = []
+    try:
+        for interface in netifaces.interfaces():
+            try:
+                addrs = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET in addrs:
+                    for addr_info in addrs[netifaces.AF_INET]:
+                        ip = addr_info.get('addr')
+                        if ip and ip != '127.0.0.1':  # Exclude localhost
+                            ips.append(ip)
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"Error getting available IPs: {e}")
+
+    return ips
 
 
 def get_domain_from_url(url):
@@ -121,28 +161,44 @@ def build_cookie_header(domain_cookies):
     return '; '.join([f"{k}={v}" for k, v in domain_cookies.items()])
 
 
-def print_ip(iface):
-    if NETIFACES_AVAILABLE:
-        adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, iface.encode('utf-8'))])
-        session = requests.session()
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        response = session.get('https://ifconfig.io/ip', timeout=30)
-        print("Restart response: " + str(response.text))
+def print_ip(local_ip):
+    """Print the current external IP address using the specified local IP."""
+    if local_ip and NETIFACES_AVAILABLE:
+        interface = get_interface_for_ip(local_ip)
+        if interface:
+            try:
+                adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
+                session = requests.session()
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                response = session.get('https://ifconfig.io/ip', timeout=30)
+                print("Current external IP: " + str(response.text.strip()))
+            except Exception as e:
+                print(f"Could not get external IP: {e}")
+        else:
+            print(f'WARN: Could not find interface for IP {local_ip}')
     else:
-        print('WARN: Skipping iface print_ip as the interface is unsupported')
+        print('WARN: Skipping IP check - no local IP specified or netifaces unavailable')
 
 
-def restart_iface(iface):
-    if NETIFACES_AVAILABLE:
-        adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, iface.encode('utf-8'))])
-        session = requests.session()
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        response = session.post('http://192.168.100.1/ajax', json={'funcNo': '1013'}, timeout=2)
-        print("Restart response (text): " + str(response.text))
+def restart_iface(local_ip):
+    """Restart interface using the specified local IP."""
+    if local_ip and NETIFACES_AVAILABLE:
+        interface = get_interface_for_ip(local_ip)
+        if interface:
+            try:
+                adapter = HTTPAdapterWithSocketOptions(socket_options=[(socket.SOL_SOCKET, 25, interface.encode('utf-8'))])
+                session = requests.session()
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                response = session.post('http://192.168.100.1/ajax', json={'funcNo': '1013'}, timeout=2)
+                print("Restart response (text): " + str(response.text))
+            except Exception as e:
+                print(f"Interface restart failed: {e}")
+        else:
+            print(f'WARN: Could not find interface for IP {local_ip}')
     else:
-        print('WARN: Skipping iface restart as the interface is unsupported')
+        print('WARN: Skipping interface restart - no local IP specified or netifaces unavailable')
 
 
 async def make_request_async(session, url, idx, headers=None, request_id=None, timeout=10, local_addr=None):
@@ -162,16 +218,6 @@ async def make_request_async(session, url, idx, headers=None, request_id=None, t
 
     # Merge default headers with provided headers
     merged_headers = {**default_headers, **headers}
-
-    # Get domain and add stored cookies
-    # domain = get_domain_from_url(url)
-    # stored_cookies = get_cookies_for_domain(domain, idx)
-
-    # if stored_cookies:
-    #     cookie_header = build_cookie_header(stored_cookies)
-    #     if cookie_header:
-    # merged_headers['Cookie'] = cookie_header
-    # print(f'[{request_id}] Using stored cookies for {domain}{str(idx)}: {len(stored_cookies)} cookies')
 
     try:
         print(f'[{request_id}] Sending async request to {url}')
@@ -204,7 +250,6 @@ async def make_request_async(session, url, idx, headers=None, request_id=None, t
         error_result = {
             'request_id': request_id,
             'url': url,
-            # 'domain': domain,
             'error': str(e),
             'success': False
         }
@@ -239,6 +284,7 @@ async def send_batch_async(urls, batch_id, timeout=30, local_addr=None, max_conc
     if local_addr:
         try:
             connector_kwargs['local_addr'] = (local_addr, 0)
+            print(f"[BATCH {batch_id}] Binding to local address: {local_addr}")
         except Exception as e:
             print(f"Warning: Could not bind to local address {local_addr}: {e}")
 
@@ -283,13 +329,12 @@ async def send_batch_async(urls, batch_id, timeout=30, local_addr=None, max_conc
 
 
 def batch_rate_limited_requester_async(urls, batches_per_second, batch_size, stop_event, results_queue,
-                                       max_concurrent=200, timeout=10, interface=None):
+                                       max_concurrent=200, timeout=10, local_ip=None):
     interval = 1.0 / batches_per_second if batches_per_second > 0 else 1.0
     batch_count = 0
 
-    local_addr = get_interface_ip(interface) if interface else None
-    if local_addr:
-        print(f"Using local address: {local_addr}")
+    if local_ip:
+        print(f"Using local IP address: {local_ip}")
 
     async def run_batches():
         nonlocal batch_count
@@ -313,14 +358,14 @@ def batch_rate_limited_requester_async(urls, batches_per_second, batch_size, sto
                     print(f"[BATCH {batch_count}] Cookie state: {total_cookies} cookies across {total_domains} domains")
 
             try:
-                print_ip(interface)
-                batch_results = await send_batch_async(batch_urls, batch_count, timeout, local_addr, max_concurrent)
+                print_ip(local_ip)
+                batch_results = await send_batch_async(batch_urls, batch_count, timeout, local_ip, max_concurrent)
 
                 for result in batch_results:
                     results_queue.put(result)
 
                 print(f"[BATCH {batch_count}] Completed {len(batch_results)} requests")
-                restart_iface(interface)
+                restart_iface(local_ip)
 
             except Exception as e:
                 print(f"[BATCH {batch_count}] Batch failed: {e}")
@@ -393,7 +438,7 @@ async def post_extracted_data_item(data):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Send HTTP requests in batches at a specified rate through a network interface (async version with cookie persistence)'
+        description='Send HTTP requests in batches at a specified rate through a specific IP address (async version with cookie persistence)'
     )
     parser.add_argument(
         '--batches_per_second',
@@ -408,9 +453,9 @@ def main():
         help='Number of requests per batch (e.g., 5 for 5 concurrent requests per batch)'
     )
     parser.add_argument(
-        '--interface',
+        '--local_ip',
         type=str,
-        help='Network interface name (e.g., eth0, wlan0)'
+        help='Local IP address to bind to (e.g., 192.168.1.100)'
     )
     parser.add_argument(
         '--max-concurrent',
@@ -433,8 +478,8 @@ def main():
 
     args = parser.parse_args()
 
-    if args.interface and not validate_interface(args.interface):
-        print(f"Interface validation failed. Continue anyway? (y/n): ", end='')
+    if args.local_ip and not validate_ip_on_system(args.local_ip):
+        print(f"IP address validation failed. Continue anyway? (y/n): ", end='')
         if input().lower() != 'y':
             return
 
@@ -450,7 +495,7 @@ def main():
     print(f"  - Batches per second: {args.batches_per_second}")
     print(f"  - Batch size: {args.batch_size}")
     print(f"  - Total requests per second: {total_rps}")
-    print(f"  - Interface: {args.interface or 'default'}")
+    print(f"  - Local IP: {args.local_ip or 'default'}")
     print(f"  - URLs: {len(urls)} loaded from {args.urls_file}")
     print(f"  - Max concurrent connections: {args.max_concurrent}")
     print(f"  - Request timeout: {args.timeout}s")
@@ -465,7 +510,7 @@ def main():
         args=(
             urls, args.batches_per_second, args.batch_size, stop_event, results_queue, args.max_concurrent,
             args.timeout,
-            args.interface)
+            args.local_ip)
     )
     requester_thread.start()
 
