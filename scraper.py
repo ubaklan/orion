@@ -450,7 +450,7 @@ def batch_rate_limited_requester_async(urls, batches_per_second, batch_size, sto
 
                 print(f"[BATCH {batch_count}] Completed {len(batch_results)} requests")
                 restart_iface(local_ip)
-                await asyncio.sleep(3)
+                await asyncio.sleep(10)
                 await wait_until_interface_available(local_ip)
             except Exception as e:
                 print(f"[BATCH {batch_count}] Batch failed: {e}")
